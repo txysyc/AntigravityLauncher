@@ -1,0 +1,11 @@
+/dist/
+/build/
+/integration/
+/logs/
+/reports/
+/.vs/
+/bin/
+/obj/
+*.user
+*.suo
+*.lnk

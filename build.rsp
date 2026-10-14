@@ -1,0 +1,9 @@
+/nologo
+/target:winexe
+/optimize+
+/codepage:65001
+/reference:System.Windows.Forms.dll
+/reference:Microsoft.CSharp.dll
+/reference:System.Runtime.Serialization.dll
+/out:dist\AntigravityLauncher.exe
+src\DesktopLauncher.cs

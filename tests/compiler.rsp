@@ -1,0 +1,10 @@
+/nologo
+/target:exe
+/main:LauncherTests
+/codepage:65001
+/reference:System.Windows.Forms.dll
+/reference:Microsoft.CSharp.dll
+/reference:System.Runtime.Serialization.dll
+/out:build\LauncherTests.exe
+src\DesktopLauncher.cs
+tests\LauncherTests.cs
