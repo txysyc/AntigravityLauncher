@@ -1,10 +1,17 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 txyc
+
 using System;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
+using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Runtime.Serialization;
+using System.Security.Cryptography;
+using System.Threading;
 
 internal static class LauncherTests
 {
@@ -23,6 +30,95 @@ internal static class LauncherTests
         try { action(); } catch (ArgumentException) { assertions++; return; }
         throw new Exception(message);
     }
+
+    private static string Hash(string path)
+    {
+        using (var stream = File.OpenRead(path))
+        using (var sha = SHA256.Create())
+            return BitConverter.ToString(sha.ComputeHash(stream));
+    }
+
+    private static LaunchReport SetIcon(string launcher, string source, string report)
+    {
+        using (Process process = Process.Start(new ProcessStartInfo {
+            FileName = launcher, UseShellExecute = false, CreateNoWindow = true,
+            Arguments = "--use-app-icon --executable " + DesktopLauncher.QuoteArgument(source) +
+                " --report " + DesktopLauncher.QuoteArgument(report)
+        }))
+        {
+            if (!process.WaitForExit(15000)) throw new Exception("Icon command did not exit");
+        }
+        var timer = Stopwatch.StartNew();
+        while (timer.ElapsedMilliseconds < 30000)
+        {
+            if (File.Exists(report))
+            {
+                LaunchReport result = null;
+                try { result = JsonFiles.Read<LaunchReport>(report); }
+                catch (IOException) { }
+                catch (SerializationException) { }
+                if (result != null)
+                {
+                    if (result.ProcessId > 0)
+                    {
+                        Process worker = null;
+                        try { worker = Process.GetProcessById(result.ProcessId); }
+                        catch (ArgumentException) { }
+                        if (worker != null)
+                            using (worker)
+                                if (!worker.WaitForExit(15000)) throw new Exception("Icon worker did not exit");
+                    }
+                    return result;
+                }
+            }
+            Thread.Sleep(100);
+        }
+        throw new Exception("Icon result was not written");
+    }
+
+    private static void TestIconCustomization()
+    {
+        string original = Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "..", "dist", "AntigravityLauncher.exe"));
+        if (!File.Exists(original)) throw new Exception("Build dist/AntigravityLauncher.exe before running tests");
+        string directory = Path.Combine(Path.GetTempPath(), "Antigravity 图标测试 " + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        string launcher = Path.Combine(directory, "启动器 test.exe");
+        string failedReport = Path.Combine(directory, "failed.json");
+        string successReport = Path.Combine(directory, "success.json");
+        string source = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "shell32.dll");
+        string originalHash = Hash(original);
+        string sourceHash = Hash(source);
+        File.Copy(original, launcher);
+        try
+        {
+            // 默认发行版不含图标，图标缺失时应保持原文件且清理临时副本。
+            LaunchReport failed = SetIcon(launcher, original, failedReport);
+            Check(failed.Action == "failed", "Iconless source was accepted");
+            Check(Hash(launcher) == originalHash, "Failed icon update changed launcher");
+            Check(Directory.GetDirectories(directory).Length == 0, "Failed icon update left temporary files");
+
+            LaunchReport success = SetIcon(launcher, source, successReport);
+            Check(success.Action == "icon-updated", "Icon update failed: " + success.Error);
+            Check(IconResources.Fingerprint(launcher) == IconResources.Fingerprint(source), "Copied icon resources differ");
+            Check(Hash(launcher) != originalHash, "Icon update did not change the executable");
+            Check(Hash(original) == originalHash && Hash(source) == sourceHash, "Icon update modified its sources");
+            Check(Directory.GetDirectories(directory).Length == 0, "Icon workers were not cleaned up");
+            Check(FileVersionInfo.GetVersionInfo(launcher).ProductVersion == "0.1.0", "Icon update lost version metadata");
+            Assembly assembly = Assembly.ReflectionOnlyLoad(File.ReadAllBytes(launcher));
+            foreach (string name in new[] { "AntigravityProxyLauncher.LICENSE", "AntigravityProxyLauncher.THIRD_PARTY_NOTICES.md" })
+            {
+                using (Stream stream = assembly.GetManifestResourceStream(name))
+                    Check(stream != null && stream.Length > 0, "Icon update lost embedded notice: " + name);
+            }
+        }
+        finally
+        {
+            // 只删除测试自身创建的已知文件，异常残留保留供排查。
+            foreach (string path in new[] { launcher, failedReport, successReport })
+                if (File.Exists(path)) File.Delete(path);
+            if (Directory.GetFileSystemEntries(directory).Length == 0) Directory.Delete(directory, false);
+        }
+    }
     private static int Main()
     {
         try
@@ -40,6 +136,10 @@ internal static class LauncherTests
             Reject(() => Options.Parse(new[] { "--proxy-port", "0" }), "Invalid port accepted");
             Reject(() => Options.Parse(new[] { "--proxy-port", "8101", "--proxy-url", "http://localhost:8101" }), "Conflicting proxies accepted");
             Reject(() => Options.Parse(new[] { "--install-shortcuts", "--restore-shortcuts" }), "Conflicting modes accepted");
+            Check(Options.Parse(new[] { "--use-app-icon" }).UseApplicationIcon, "Icon option parsing failed");
+            Reject(() => Options.Parse(new[] { "--use-app-icon", "--check" }), "Icon and check modes accepted");
+            Reject(() => Options.Parse(new[] { "--use-app-icon", "--proxy-port", "8101" }), "Icon mode accepted proxy options");
+            Reject(() => Options.Parse(new[] { "--use-app-icon", "--", "--help" }), "Icon mode accepted app arguments");
             Check(Options.Parse(new[] { "--", "--user-data-dir", "folder with spaces" }).ApplicationArguments.Count == 2, "Argument forwarding failed");
 
             string previous = Environment.GetEnvironmentVariable("HTTP_PROXY");
@@ -82,7 +182,8 @@ internal static class LauncherTests
             catch (InvalidOperationException) { refused = true; }
             Check(refused, "Closed proxy port accepted");
             DesktopLauncher.VerifyProxyPorts(ProxyConfiguration.Direct());
-            Console.WriteLine("Passed: " + assertions + " assertions (proxy parsing, private environment, Windows argv, TCP preflight).");
+            TestIconCustomization();
+            Console.WriteLine("Passed: " + assertions + " assertions (proxy parsing, private environment, Windows argv, TCP preflight, local icon customization).");
             return 0;
         }
         catch (Exception exception) { Console.Error.WriteLine(exception); return 1; }

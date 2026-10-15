@@ -1,11 +1,16 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 txyc
+
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Runtime.Serialization;
 using System.Runtime.Serialization.Json;
@@ -14,6 +19,14 @@ using System.Text;
 using System.Text.RegularExpressions;
 using System.Windows.Forms;
 using Microsoft.Win32;
+
+[assembly: AssemblyTitle("Antigravity Proxy Launcher")]
+[assembly: AssemblyDescription("为 Antigravity 配置 Windows 系统代理的启动器")]
+[assembly: AssemblyProduct("Antigravity Proxy Launcher")]
+[assembly: AssemblyCopyright("Copyright (c) 2026 txyc")]
+[assembly: AssemblyVersion("0.1.0.0")]
+[assembly: AssemblyFileVersion("0.1.0.0")]
+[assembly: AssemblyInformationalVersion("0.1.0")]
 
 internal static class DesktopLauncher
 {
@@ -28,7 +41,14 @@ internal static class DesktopLauncher
         Options options = null;
         try
         {
+            if (args.Length > 0 && args[0].StartsWith("--internal-icon-", StringComparison.Ordinal))
+                return IconCustomization.RunWorker(args);
             options = Options.Parse(args);
+            if (options.UseApplicationIcon)
+            {
+                IconCustomization.Start(FindApplication(options.ExecutablePath), options.ReportPath);
+                return 0;
+            }
             if (options.InstallShortcuts || options.RestoreShortcuts)
             {
                 WriteReport(options.ReportPath, new LaunchReport { Action = options.RestoreShortcuts ? Shortcuts.Restore() : Shortcuts.Install() });
@@ -252,9 +272,296 @@ internal static class DesktopLauncher
     }
 }
 
+[DataContract]
+internal sealed class IconUpdateRequest
+{
+    [DataMember] public string TargetPath;
+    [DataMember] public string OriginalHash;
+    [DataMember] public string UpdatedHash;
+    [DataMember] public string ReportPath;
+    [DataMember] public int OwnerId;
+    [DataMember] public long OwnerStartTicks;
+}
+
+internal static class IconCustomization
+{
+    private const string DirectoryPrefix = ".antigravity-icon-";
+    private const int ExitTimeoutMilliseconds = 15000;
+    private static string CurrentPath { get { return Process.GetCurrentProcess().MainModule.FileName; } }
+
+    private static string Hash(string path)
+    {
+        using (var stream = File.OpenRead(path))
+        using (var sha = SHA256.Create())
+            return BitConverter.ToString(sha.ComputeHash(stream));
+    }
+
+    private static void SetOwner(IconUpdateRequest request)
+    {
+        using (Process process = Process.GetCurrentProcess())
+        {
+            request.OwnerId = process.Id;
+            request.OwnerStartTicks = process.StartTime.ToUniversalTime().Ticks;
+        }
+    }
+
+    private static void WaitForOwner(IconUpdateRequest request)
+    {
+        Process owner;
+        try { owner = Process.GetProcessById(request.OwnerId); }
+        catch (ArgumentException) { return; }
+        using (owner)
+        {
+            if (owner.StartTime.ToUniversalTime().Ticks != request.OwnerStartTicks) return;
+            if (!owner.WaitForExit(ExitTimeoutMilliseconds))
+                throw new InvalidOperationException("等待图标设置进程退出超时，请关闭其他启动器实例后重试。");
+        }
+    }
+
+    private static void StartWorker(string executable, string mode, string requestPath)
+    {
+        using (Process process = Process.Start(new ProcessStartInfo {
+            FileName = executable,
+            Arguments = mode + " " + DesktopLauncher.QuoteArgument(requestPath),
+            UseShellExecute = false, CreateNoWindow = true,
+            WorkingDirectory = Path.GetDirectoryName(executable)
+        })) { }
+    }
+
+    internal static void Start(string application, string reportPath)
+    {
+        string target = CurrentPath;
+        string directory = Path.Combine(Path.GetDirectoryName(target), DirectoryPrefix + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            string worker = Path.Combine(directory, "worker.exe");
+            string updated = Path.Combine(directory, "updated.exe");
+            File.Copy(target, worker);
+            File.Copy(target, updated);
+            IconResources.Copy(application, updated);
+            if (IconResources.Fingerprint(application) != IconResources.Fingerprint(updated))
+                throw new InvalidOperationException("更新后的图标资源校验失败。");
+            var request = new IconUpdateRequest {
+                TargetPath = target, OriginalHash = Hash(target), UpdatedHash = Hash(updated),
+                ReportPath = String.IsNullOrEmpty(reportPath) ? null : Path.GetFullPath(reportPath)
+            };
+            SetOwner(request);
+            string requestPath = Path.Combine(directory, "update.json");
+            JsonFiles.Write(requestPath, request);
+            StartWorker(worker, "--internal-icon-apply", requestPath);
+        }
+        catch
+        {
+            Cleanup(directory);
+            throw;
+        }
+    }
+
+    private static string Validate(string requestPath, IconUpdateRequest request, bool finishing)
+    {
+        string fullPath = Path.GetFullPath(requestPath);
+        string directory = Path.GetDirectoryName(fullPath);
+        string name = Path.GetFileName(directory);
+        Guid identifier;
+        if (Path.GetFileName(fullPath) != "update.json" ||
+            !name.StartsWith(DirectoryPrefix, StringComparison.Ordinal) ||
+            !Guid.TryParseExact(name.Substring(DirectoryPrefix.Length), "N", out identifier) ||
+            !String.Equals(Path.GetDirectoryName(directory), Path.GetDirectoryName(request.TargetPath), StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("图标更新请求路径无效。");
+        string worker = Path.Combine(directory, "worker.exe");
+        string expectedPath = finishing ? request.TargetPath : worker;
+        if (!String.Equals(CurrentPath, expectedPath, StringComparison.OrdinalIgnoreCase) ||
+            Hash(worker) != request.OriginalHash ||
+            Hash(request.TargetPath) != (finishing ? request.UpdatedHash : request.OriginalHash) ||
+            (!finishing && Hash(Path.Combine(directory, "updated.exe")) != request.UpdatedHash))
+            throw new InvalidOperationException("启动器文件已变化，取消图标更新。");
+        return directory;
+    }
+
+    private static void Cleanup(string directory)
+    {
+        // 只清理本次操作的已知文件，不递归删除目录。
+        foreach (string name in new[] { "worker.exe", "updated.exe", "previous.exe", "update.json" })
+        {
+            string path = Path.Combine(directory, name);
+            if (File.Exists(path)) File.Delete(path);
+        }
+        Directory.Delete(directory, false);
+    }
+
+    private static void Report(IconUpdateRequest request, string error)
+    {
+        if (!String.IsNullOrEmpty(request.ReportPath))
+            JsonFiles.Write(request.ReportPath, new LaunchReport {
+                Time = DateTimeOffset.Now.ToString("o"), Action = error == null ? "icon-updated" : "failed",
+                ExecutablePath = request.TargetPath, ProcessId = Process.GetCurrentProcess().Id, Error = error
+            });
+        else
+            MessageBox.Show(error ?? "启动器图标已更新。资源管理器可能需要刷新后才显示新图标。",
+                "Antigravity Launcher", MessageBoxButtons.OK, error == null ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
+    }
+
+    internal static int RunWorker(string[] args)
+    {
+        IconUpdateRequest request = null;
+        try
+        {
+            if (args.Length != 2 || (args[0] != "--internal-icon-apply" && args[0] != "--internal-icon-finish"))
+                throw new ArgumentException("图标更新内部参数无效。");
+            request = JsonFiles.Read<IconUpdateRequest>(args[1]);
+            bool finishing = args[0] == "--internal-icon-finish";
+            string directory = Validate(args[1], request, finishing);
+            WaitForOwner(request);
+            // 等待期间若其他程序替换了启动器，停止操作。
+            Validate(args[1], request, finishing);
+            if (!finishing)
+            {
+                string updated = Path.Combine(directory, "updated.exe");
+                string previous = Path.Combine(directory, "previous.exe");
+                File.Replace(updated, request.TargetPath, previous);
+                try
+                {
+                    SetOwner(request);
+                    JsonFiles.Write(args[1], request);
+                    StartWorker(request.TargetPath, "--internal-icon-finish", args[1]);
+                }
+                catch
+                {
+                    File.Replace(previous, request.TargetPath, updated);
+                    throw;
+                }
+            }
+            else
+            {
+                Cleanup(directory);
+                SHChangeNotify(0x00002000, 0x0005, request.TargetPath, IntPtr.Zero);
+                Report(request, null);
+            }
+            return 0;
+        }
+        catch (Exception exception)
+        {
+            if (request == null) throw;
+            Report(request, "图标设置失败：" + exception.Message);
+            return 1;
+        }
+    }
+
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+    private static extern void SHChangeNotify(uint eventId, uint flags, string item, IntPtr unused);
+}
+
+internal static class IconResources
+{
+    private const int IconType = 3;
+    private const int GroupType = 14;
+    private sealed class Data { internal byte[] Group; internal byte[][] Images; }
+    private delegate bool ResourceCallback(IntPtr module, IntPtr type, IntPtr name, IntPtr parameter);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr LoadLibraryEx(string path, IntPtr reserved, uint flags);
+    [DllImport("kernel32.dll")]
+    private static extern bool FreeLibrary(IntPtr module);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool EnumResourceNames(IntPtr module, IntPtr type, ResourceCallback callback, IntPtr parameter);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr FindResource(IntPtr module, IntPtr name, IntPtr type);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint SizeofResource(IntPtr module, IntPtr resource);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr LoadResource(IntPtr module, IntPtr resource);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr LockResource(IntPtr resource);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr BeginUpdateResource(string path, bool deleteExisting);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool UpdateResource(IntPtr update, IntPtr type, IntPtr name, ushort language, byte[] bytes, uint length);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool EndUpdateResource(IntPtr update, bool discard);
+
+    private static byte[] Read(IntPtr module, IntPtr name, int type)
+    {
+        IntPtr resource = FindResource(module, name, (IntPtr)type);
+        if (resource == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
+        uint length = SizeofResource(module, resource);
+        if (length == 0 || length > 16 * 1024 * 1024) throw new InvalidDataException("图标资源大小无效。");
+        IntPtr pointer = LockResource(LoadResource(module, resource));
+        if (pointer == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
+        byte[] bytes = new byte[(int)length];
+        Marshal.Copy(pointer, bytes, 0, bytes.Length);
+        return bytes;
+    }
+
+    private static Data Read(string path)
+    {
+        // 以数据资源方式读取原程序，不执行其代码。
+        IntPtr module = LoadLibraryEx(path, IntPtr.Zero, 0x22);
+        if (module == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
+        try
+        {
+            byte[] group = null;
+            Exception failure = null;
+            ResourceCallback callback = delegate(IntPtr handle, IntPtr type, IntPtr name, IntPtr parameter) {
+                try { if (group == null) group = Read(handle, name, GroupType); }
+                catch (Exception exception) { failure = exception; }
+                return true;
+            };
+            EnumResourceNames(module, (IntPtr)GroupType, callback, IntPtr.Zero);
+            if (failure != null) throw failure;
+            if (group == null || group.Length < 6) throw new InvalidDataException("指定程序没有可用图标。");
+            int count = BitConverter.ToUInt16(group, 4);
+            if (BitConverter.ToUInt16(group, 0) != 0 || BitConverter.ToUInt16(group, 2) != 1 ||
+                count < 1 || count > 256 || group.Length != 6 + count * 14)
+                throw new InvalidDataException("图标目录格式无效。");
+            var data = new Data { Group = group, Images = new byte[count][] };
+            for (int index = 0; index < count; index++)
+            {
+                data.Images[index] = Read(module, (IntPtr)BitConverter.ToUInt16(group, 6 + index * 14 + 12), IconType);
+                if (data.Images[index].Length != BitConverter.ToUInt32(group, 6 + index * 14 + 8))
+                    throw new InvalidDataException("图标资源长度不一致。");
+                byte[] id = BitConverter.GetBytes((ushort)(index + 1));
+                Array.Copy(id, 0, group, 6 + index * 14 + 12, id.Length);
+            }
+            return data;
+        }
+        finally { FreeLibrary(module); }
+    }
+
+    internal static string Fingerprint(string path)
+    {
+        Data data = Read(path);
+        using (var stream = new MemoryStream())
+        using (var sha = SHA256.Create())
+        {
+            stream.Write(data.Group, 0, data.Group.Length);
+            foreach (byte[] image in data.Images) stream.Write(image, 0, image.Length);
+            return BitConverter.ToString(sha.ComputeHash(stream.ToArray()));
+        }
+    }
+
+    internal static void Copy(string source, string target)
+    {
+        Data data = Read(source);
+        IntPtr update = BeginUpdateResource(target, false);
+        if (update == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
+        try
+        {
+            for (int index = 0; index < data.Images.Length; index++)
+                if (!UpdateResource(update, (IntPtr)IconType, (IntPtr)(index + 1), 0, data.Images[index], (uint)data.Images[index].Length))
+                    throw new Win32Exception(Marshal.GetLastWin32Error());
+            if (!UpdateResource(update, (IntPtr)GroupType, (IntPtr)1, 0, data.Group, (uint)data.Group.Length))
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            if (!EndUpdateResource(update, false)) throw new Win32Exception(Marshal.GetLastWin32Error());
+            update = IntPtr.Zero;
+        }
+        finally { if (update != IntPtr.Zero) EndUpdateResource(update, true); }
+    }
+}
+
 internal sealed class Options
 {
-    internal bool CheckOnly, InstallShortcuts, RestoreShortcuts;
+    internal bool CheckOnly, InstallShortcuts, RestoreShortcuts, UseApplicationIcon;
     internal int? ProxyPort;
     internal string ProxyUrl, ExecutablePath, ReportPath;
     internal readonly List<string> ApplicationArguments = new List<string>();
@@ -270,6 +577,7 @@ internal sealed class Options
                 case "--check": result.CheckOnly = true; break;
                 case "--install-shortcuts": result.InstallShortcuts = true; break;
                 case "--restore-shortcuts": result.RestoreShortcuts = true; break;
+                case "--use-app-icon": result.UseApplicationIcon = true; break;
                 case "--proxy-port":
                     int port;
                     if (++index >= args.Length || !Int32.TryParse(args[index], out port) || port < 1 || port > UInt16.MaxValue)
@@ -283,8 +591,10 @@ internal sealed class Options
             }
         }
         if (result.ProxyPort.HasValue && result.ProxyUrl != null) throw new ArgumentException("不能同时指定 --proxy-port 和 --proxy-url。");
-        if ((result.CheckOnly ? 1 : 0) + (result.InstallShortcuts ? 1 : 0) + (result.RestoreShortcuts ? 1 : 0) > 1)
-            throw new ArgumentException("检查、安装快捷方式、恢复快捷方式不能同时使用。");
+        if ((result.CheckOnly ? 1 : 0) + (result.InstallShortcuts ? 1 : 0) + (result.RestoreShortcuts ? 1 : 0) + (result.UseApplicationIcon ? 1 : 0) > 1)
+            throw new ArgumentException("检查、快捷方式管理与图标设置不能同时使用。");
+        if (result.UseApplicationIcon && (result.ProxyPort.HasValue || result.ProxyUrl != null || result.ApplicationArguments.Count > 0))
+            throw new ArgumentException("图标设置不能同时指定代理或应用启动参数。");
         return result;
     }
     private static string Next(string[] args, ref int index)

@@ -2,6 +2,8 @@
 /target:winexe
 /optimize+
 /codepage:65001
+/resource:LICENSE,AntigravityProxyLauncher.LICENSE
+/resource:THIRD_PARTY_NOTICES.md,AntigravityProxyLauncher.THIRD_PARTY_NOTICES.md
 /reference:System.Windows.Forms.dll
 /reference:Microsoft.CSharp.dll
 /reference:System.Runtime.Serialization.dll

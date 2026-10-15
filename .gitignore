@@ -6,6 +6,7 @@
 /.vs/
 /bin/
 /obj/
+.antigravity-icon-*/
 *.user
 *.suo
 *.lnk
