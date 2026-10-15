@@ -36,7 +36,7 @@
 
 ### 1. 准备启动器
 
-自行[编译](#编译)，或从本仓库的 Releases 下载已发布版本，取得 `AntigravityLauncher.exe`。
+自行[编译](#编译)，或从本仓库的 Releases 直接下载 `AntigravityLauncher.exe`，无需解压。
 
 将启动器放到 Antigravity 安装目录，与原程序同级：
 
@@ -81,7 +81,9 @@ New-Item -ItemType Directory -Path dist -Force | Out-Null
 
 `build.rsp` 使用相对路径引用源码和许可文件。编译器路径通过 Windows 环境变量确定；若系统只安装了 32 位框架，可将 `Framework64` 改为 `Framework`。
 
-编译时将版本信息、`LICENSE` 和 `THIRD_PARTY_NOTICES.md` 嵌入 EXE。默认发行版不包含 Antigravity 原版图标。运行时无需携带源码、编译配置、独立图标、脚本或额外 DLL。对外分发时，请随发布包保留许可与第三方声明。
+编译时将版本信息、`LICENSE` 和 `THIRD_PARTY_NOTICES.md` 嵌入 EXE。默认发行版不包含 Antigravity 原版图标。运行时无需携带源码、编译配置、独立图标、脚本或额外 DLL。
+
+GitHub Releases 直接提供单个 EXE，无需打包为 ZIP。许可与第三方声明已内嵌，源码仓库中也保留相应文件；可另附独立校验文件供下载者核验。
 
 ## 使用说明
 
@@ -141,7 +143,7 @@ New-Item -ItemType Directory -Path dist -Force | Out-Null
 
 设置时需要启动器所在目录的写入权限；如目录不可写，可先在可写目录完成设置，再放回安装目录。替换会改变 EXE 的哈希；校验发布文件时请使用未定制的版本。资源管理器可能需要刷新后才显示新图标。
 
-图标仅在用户本机读取，仓库和默认发布包不分发原版图标。定制后的 EXE 若再次分发，仍需自行确认图标的适用许可。恢复默认图标可使用原始发布文件替换启动器。
+图标仅在用户本机读取，仓库和默认发行版不分发原版图标。定制后的 EXE 若再次分发，仍需自行确认图标的适用许可。恢复默认图标可使用原始发布文件替换启动器。
 
 ### 快捷方式管理
 
@@ -245,6 +247,6 @@ New-Item -ItemType Directory -Path dist -Force | Out-Null
 
 本项目原创源码、测试、编译配置和文档采用 [MIT License](LICENSE)。
 
-仓库和默认发布包不包含 Antigravity 原版图标。用户可在本机通过 `--use-app-icon` 设置图标，或让快捷方式引用已安装的原程序。原版图标和相关商标的权利归原权利方所有，**不属于本项目的 MIT 授权范围**；本项目不授予额外的图标使用或再分发许可。
+仓库和默认发行版不包含 Antigravity 原版图标。用户可在本机通过 `--use-app-icon` 设置图标，或让快捷方式引用已安装的原程序。原版图标和相关商标的权利归原权利方所有，**不属于本项目的 MIT 授权范围**；本项目不授予额外的图标使用或再分发许可。
 
 完整来源与权利说明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。Antigravity 的使用另受其[官方条款](https://antigravity.google/terms)约束。
